@@ -1779,25 +1779,27 @@ Agent 生成高风险动作后不执行，而是保存 Checkpoint 并进入 `WAI
 
 写操作幂等键由业务动作决定，例如 `run_id + logical_step + target`，下游原子保存 key 与结果；重试始终使用同一 key。超时进入 `UNKNOWN_RESULT`，先查状态。每次 attempt 独立记录，但归属于同一逻辑 tool call，便于统计重试放大。
 
-### 161. Function Calling、MCP 和 Tool Search 如何协同？
+### 161. Function Calling、MCP、Skill 和 Tool Search 如何协同？
 
 **参考答案：**
 
-Function Calling/Tool Calling 解决模型输出接口：模型根据给定工具 Schema 生成工具名和结构化参数，真正的执行、鉴权和错误处理仍由应用完成。MCP 解决系统集成协议：Host/Client 如何发现并调用 Server 暴露的 Tool、Resource 和 Prompt，使同一外部能力能被多个 Agent/客户端复用。应用可以用 Function Calling 选择 MCP Tool，两者不冲突。
+四者解决不同层次的问题：**Skill** 描述完成某类任务的方法、约束和验收标准，决定“怎么做”；**Tool Search** 在大量能力中按意图、权限和风险召回候选，决定“当前可考虑哪些工具”；**MCP** 统一能力发现和客户端—服务端通信，让外部 Tool、Resource、Prompt 可复用；**Function Calling** 则是模型表达“调用哪个工具、传什么参数”的结构化接口。真正执行、鉴权和错误处理仍由应用完成。
 
-工具太多时采用分层披露：常用且安全的 3–5 个工具常驻；其余只给名称、用途、风险、标签的短目录；先用规则/向量/BM25/小模型做 Tool Search，选出 Top-K 后再加载完整 Schema、示例和约束。近义工具合并，描述明确“何时用/何时不用/返回什么”。
+典型流程是：识别任务 → 按需加载 Skill → Tool Search 召回 Top-K → 加载候选工具完整 Schema → LLM 通过 Function Calling 选择并生成参数 → 应用校验后调用内部或 MCP Tool → 将 Tool Result 回填给模型。工具较少时可以省略 Tool Search；Skill 也不产生外部动作，它只是指导模型如何组合工具。
 
-工具检索本身需要评测 Top-K recall、误选率、首轮参数正确率、Token 和端到端成功率。权限过滤必须发生在检索前；动态发现不等于动态信任，新 MCP Server 仍需 allowlist、版本和凭证策略。
+权限过滤必须早于工具披露；动态发现不等于动态信任，新 MCP Server 仍需 allowlist、版本和凭证策略。评测分别看 Skill 触发正确率、Tool Recall@K、误选率、首轮参数正确率、Token 和端到端任务成功率。
 
-### 162. RAG 在 Agent 中什么时机触发检索？Query 改写和 Rerank 怎么接？
+### 162. RAG、Agent 和 Agentic RAG 有什么关系？检索链路如何接入 Agent？
 
 **参考答案：**
 
-不是每轮都检索。Router 根据任务是否依赖私有/最新知识、当前证据是否足够、用户是否要求引用，以及计划节点类型决定走直接回答、结构化工具还是 RAG。也可把 `retrieve` 暴露为受控 Tool，但对合规知识等必查场景应由 Workflow 强制触发，不能完全交给模型。
+RAG 解决“回答时缺少外部知识”的问题，典型流程是固定的“检索 → 组装证据 → 生成”；Agent 解决“如何围绕目标动态选择下一步行动”的问题，可以调用检索、数据库、代码和业务 API。因此 RAG 通常是 Agent 的一个知识工具，而不是 Agent 的替代品。
 
-在线链路：从当前问题 + 已确认上下文抽取独立 query，保留实体、时间、否定和权限范围；必要时做 multi-query/HyDE，但原 query 同时保留，防止改写漂移；经过 ACL/版本过滤后做 BM25 + 向量混合召回，RRF 融合去重；Cross-Encoder/Reranker 对少量候选精排；按子问题和 Token 预算组装证据，附稳定引用 ID。
+**Agentic RAG** 是把检索决策放进 Agent 循环：模型根据当前证据决定是否检索、查哪个数据源、怎样改写 query、结果是否充分，以及要不要再次检索。不是每轮都检索；依赖私有/最新知识、要求引用或证据不足时触发，合规必查场景则由 Workflow 强制执行。
 
-评测要拆层：Query Rewrite 看实体/约束保真；检索看 Recall@K、nDCG、权限正确率；Rerank 看 MRR/nDCG；生成看忠实度、引用准确/覆盖和拒答正确率。检索不到时应换查询策略或说明证据不足，不让模型用参数记忆补造事实。
+在线链路通常是：从问题和已确认上下文提取独立 query，保留实体、时间、否定和权限范围 → ACL/版本过滤 → BM25 与向量混合召回 → RRF 融合去重 → Reranker 精排 → 按子问题和 Token 预算组装带 citation ID 的证据。检索失败时换策略或明确证据不足，不能让模型用参数记忆补造。
+
+评测分层进行：Query Rewrite 看约束保真；召回看 Recall@K、nDCG 和权限正确率；Rerank 看 MRR/nDCG；生成看 faithfulness、引用准确/覆盖和拒答正确率；最后关联端到端任务成功、时延与成本。
 
 ### 163. Prompt Injection 怎么防？危险工具调用怎么拦截？敏感数据怎么脱敏？
 
@@ -2548,13 +2550,15 @@ ReAct 通常沿一条轨迹逐步行动；LATS 一类方法在关键状态生成
 
 不同语言可按生态优势承担编排、企业集成、网关或高并发服务，但重试 owner、权限和业务规则必须只有一个权威实现，不能在各服务中复制。兼容矩阵和 contract test 进入 CI，协议不兼容时拒绝启动；性能实现可以不同，安全、不变量和状态语义不能漂移。
 
-### 249. Function Calling 与“让模型直接输出 JSON”有什么本质区别？
+### 249. Function Calling 是什么？底层流程如何实现？与直接输出 JSON 有何区别？
 
 **参考答案：**
 
-直接输出 JSON 只是内容格式约束，模型仍可能混入解释、漏字段或输出无法解析的数据；Function Calling 是模型 API 的结构化动作通道，工具名、参数 Schema、调用 ID 和后续 Tool Result 都进入协议层，便于多轮配对、并行调用和运行时校验。
+Function Calling 是模型 API 提供的结构化动作通道。**LLM 不会真正执行函数**，只负责判断是否需要工具，并生成工具名和参数；实际执行由应用或 Agent Runtime 完成。
 
-Function Calling 也不保证业务正确：服务端仍要做 Schema、语义、权限、幂等和策略校验。纯 JSON 适合无副作用的信息抽取或结构化回答；真正调用外部能力时优先使用 Tool Calling。两者可组合：Function Calling 表达动作，参数内部承载业务 JSON。评测首次合法率、语义错误率和受限修复次数。
+基本流程有四步：① 应用把工具名称、描述和参数 Schema 提供给模型；② 模型返回带 `tool_call_id` 的 Tool Call；③ 应用解析后执行 Schema、语义、权限和策略校验，再调用真实函数或服务；④ 将对应 Tool Result 连同调用 ID 回填消息历史，模型据此继续调用工具或生成最终答案。多个无依赖调用可以并行，有数据依赖或写冲突的调用必须串行。
+
+直接输出 JSON 只是内容格式约束，模型可能夹杂文本、漏字段或无法解析；Function Calling 还定义工具名、参数 Schema、调用 ID 和 Tool Result 配对，便于多轮协议、并行调用和运行时校验。但它只保证接口更结构化，不保证业务正确，服务端仍须处理权限、幂等、结果未知和副作用策略。纯 JSON 更适合无副作用的信息抽取或结构化回答。
 
 ### 250. Re-planning 为什么会产生“计划抖动”？如何限制？
 
@@ -2724,6 +2728,7 @@ ChatMemory 是为模型每轮选择和组织会话消息的组件，不等于长
 
 以下链接用于继续查阅 Agent 工程、评测、安全和系统设计资料。
 
+- [代码随想录：2026 年 Agent 大厂面试题汇总](https://zhuanlan.zhihu.com/p/2028511483969937686)
 - [李博杰：《AI Agent 入门》](https://github.com/bojieli/ai-agent-book/blob/main/book/chapter1.md)
 - [Lilian Weng：LLM Powered Autonomous Agents](https://lilianweng.github.io/posts/2023-06-23-agent/)
 - [Anthropic：Common workflow patterns for AI agents](https://claude.com/resources/articles/common-workflow-patterns-for-ai-agents-and-when-to-use-them)

@@ -1755,25 +1755,27 @@ First classify failures. Do not retry parameter errors, permission errors, or bu
 
 The business action determines the idempotency key for a write, such as `run_id + logical_step + target`. The downstream service atomically stores the key and result, and retries always reuse the same key. A timeout enters `UNKNOWN_RESULT`, after which the status is queried first. Record each attempt separately, but associate all attempts with the same logical tool call to make retry amplification measurable.
 
-### 161. How Should Function Calling, MCP, and Tool Search Work Together?
+### 161. How Should Function Calling, MCP, Skills, and Tool Search Work Together?
 
 **Reference answer:**
 
-Function Calling/Tool Calling defines the model-output interface: based on the provided tool Schema, the model generates a tool name and structured parameters. Actual execution, authentication, and error handling are still performed by the application. MCP defines the system-integration protocol: how a Host/Client discovers and invokes Tools, Resources, and Prompts exposed by a Server, allowing the same external capability to be reused by multiple Agents/clients. An application can use Function Calling to select an MCP Tool; the two do not conflict.
+They address different layers. A **Skill** describes the method, constraints, and acceptance criteria for a task, guiding “how to do it.” **Tool Search** retrieves candidates from a large capability catalog using intent, permissions, and risk, determining which tools should currently be considered. **MCP** standardizes capability discovery and client–server communication so external Tools, Resources, and Prompts can be reused. **Function Calling** is the structured interface through which the model states which tool to invoke and with what arguments. Actual execution, authorization, and error handling remain the application's responsibility.
 
-When there are too many tools, use layered disclosure. Keep 3–5 common and safe tools permanently available. For the rest, provide only a short catalog containing names, purposes, risks, and tags. First use rules/vectors/BM25/a small model for Tool Search, then load the complete Schema, examples, and constraints only for the selected Top-K tools. Merge synonymous tools, and clearly state in descriptions “when to use/when not to use/what it returns.”
+A typical flow is: identify the task → load the relevant Skill on demand → use Tool Search to retrieve Top-K candidates → load their complete Schemas → let the LLM select a tool and generate arguments through Function Calling → validate and invoke an internal or MCP Tool → feed the Tool Result back to the model. Tool Search can be omitted when the catalog is small. A Skill does not perform external actions; it guides how tools are combined.
 
-Tool retrieval itself requires evaluation of Top-K recall, incorrect-selection rate, first-attempt parameter accuracy, Tokens, and end-to-end success rate. Permission filtering must occur before retrieval. Dynamic discovery does not imply dynamic trust; a new MCP Server still requires an allowlist, version policy, and credential policy.
+Permission filtering must precede disclosure. Dynamic discovery does not imply dynamic trust; a new MCP Server still requires an allowlist, version policy, and credential policy. Evaluate Skill-trigger accuracy, Tool Recall@K, incorrect selection, first-attempt argument accuracy, Token usage, and end-to-end task success.
 
-### 162. When Should RAG Trigger Retrieval in an Agent? How Should Query Rewriting and Reranking Be Integrated?
+### 162. How Are RAG, Agents, and Agentic RAG Related? How Should Retrieval Be Integrated into an Agent?
 
 **Reference answer:**
 
-Retrieval should not occur on every turn. A Router decides whether to use a direct answer, structured tool, or RAG based on whether the task depends on private/current knowledge, whether the current evidence is sufficient, whether the user requires citations, and the type of plan node. `retrieve` may also be exposed as a controlled Tool, but for mandatory-retrieval scenarios such as compliance knowledge, a Workflow should force retrieval rather than leaving it entirely to the model.
+RAG addresses missing external knowledge at answer time, typically through a fixed “retrieve → assemble evidence → generate” flow. An Agent addresses how to dynamically choose the next action toward a goal and may use retrieval, databases, code, and business APIs. RAG is therefore usually a knowledge tool used by an Agent rather than an alternative to an Agent.
 
-The online flow is as follows: extract a standalone query from the current question + confirmed context while preserving entities, time, negation, and permission scope. Use multi-query/HyDE when necessary, but retain the original query as well to prevent rewrite drift. After ACL/version filtering, perform BM25 + vector hybrid retrieval, use RRF to fuse and deduplicate results, and apply a Cross-Encoder/Reranker to rerank a small candidate set. Assemble evidence by subproblem and Token budget, with stable citation IDs.
+**Agentic RAG** moves retrieval decisions into the Agent loop: based on current evidence, the model decides whether to retrieve, which source to query, how to rewrite the query, whether evidence is sufficient, and whether another retrieval round is needed. Retrieval should not run on every turn. Trigger it for private/current knowledge, citation requirements, or insufficient evidence; a Workflow should force retrieval for mandatory compliance knowledge.
 
-Evaluation should be separated by layer. Query Rewrite evaluates entity/constraint fidelity. Retrieval evaluates Recall@K, nDCG, and permission correctness. Reranking evaluates MRR/nDCG. Generation evaluates faithfulness, citation accuracy/coverage, and correct refusal rate. When retrieval returns nothing, change the query strategy or state that evidence is insufficient; do not let the model fabricate facts from parametric memory.
+The online flow is typically: derive a standalone query from the question and confirmed context while preserving entities, time, negation, and permission scope → apply ACL/version filtering → run BM25 and vector retrieval → fuse and deduplicate with RRF → rerank with a Reranker → assemble evidence with stable citation IDs by subproblem and Token budget. If retrieval fails, change strategy or state that evidence is insufficient; do not fabricate from parametric memory.
+
+Evaluate each layer: constraint fidelity for Query Rewrite; Recall@K, nDCG, and permission correctness for retrieval; MRR/nDCG for reranking; faithfulness, citation accuracy/coverage, and correct refusal for generation; then connect them to end-to-end task success, latency, and cost.
 
 ### 163. How Can Prompt Injection Be Prevented? How Should Dangerous Tool Calls Be Blocked? How Should Sensitive Data Be Redacted?
 
@@ -2520,13 +2522,15 @@ Do not perform superficial ports based on directory structure. First freeze the 
 
 Different languages may serve orchestration, enterprise integration, gateway, or high-concurrency workloads according to their ecosystem strengths, but retry ownership, permissions, and business rules must have one authoritative implementation rather than copies in every service. Put the compatibility matrix and contract tests in CI, and refuse startup when protocols are incompatible. Performance implementations may differ; safety, invariants, and state semantics must not drift.
 
-### 249. What is the fundamental difference between Function Calling and “having the model output JSON directly”?
+### 249. What Is Function Calling? How Does Its Runtime Flow Work, and How Does It Differ from Direct JSON Output?
 
 **Reference answer:**
 
-Directly outputting JSON is only a content-format constraint; the model may still include explanations, omit fields, or produce unparseable data. Function Calling is a structured action channel in the model API. The tool name, argument Schema, call ID, and subsequent Tool Result all enter the protocol layer, enabling multi-turn pairing, parallel calls, and runtime validation.
+Function Calling is a structured action channel provided by a model API. **The LLM does not execute the function.** It only decides whether a tool is needed and generates the tool name and arguments; the application or Agent Runtime performs the real execution.
 
-Function Calling still does not guarantee business correctness. The server must continue to perform Schema, semantic, permission, idempotency, and policy validation. Plain JSON is suitable for side-effect-free information extraction or structured answers. Prefer Tool Calling when invoking external capabilities. The two can be combined: Function Calling represents the action, while its arguments carry business JSON. Evaluate first-attempt validity, semantic error rate, and the number of constrained repair attempts.
+The flow has four steps: (1) the application provides tool names, descriptions, and argument Schemas to the model; (2) the model returns a Tool Call with a `tool_call_id`; (3) the application parses it, performs Schema, semantic, permission, and policy validation, and invokes the real function or service; (4) the matching Tool Result and call ID are appended to message history so the model can invoke another tool or produce the final answer. Independent calls may run in parallel; calls with data dependencies or write conflicts must be serialized.
+
+Direct JSON output is only a content-format constraint: the model may mix in text, omit fields, or produce invalid JSON. Function Calling additionally defines the tool name, argument Schema, call ID, and Tool Result pairing, enabling multi-turn protocol handling, parallel calls, and Runtime validation. It still does not guarantee business correctness; the server must enforce permissions, idempotency, unknown-result handling, and side-effect policy. Plain JSON is better suited to side-effect-free extraction or structured responses.
 
 ### 250. Why does Re-planning cause “plan thrashing”? How can it be constrained?
 
@@ -2694,6 +2698,7 @@ Trim by message blocks; Tool Call and Tool Result must not be separated. Always 
 
 The following links provide additional materials on Agent engineering, evaluation, security, and system design.
 
+- [Code Capriccio: 2026 Agent Interview Questions](https://zhuanlan.zhihu.com/p/2028511483969937686)
 - [Li Bojie: AI Agent Primer, Chapter 1](https://github.com/bojieli/ai-agent-book/blob/main/book/chapter1.md)
 - [Lilian Weng: LLM Powered Autonomous Agents](https://lilianweng.github.io/posts/2023-06-23-agent/)
 - [Anthropic: Common workflow patterns for AI agents](https://claude.com/resources/articles/common-workflow-patterns-for-ai-agents-and-when-to-use-them)
