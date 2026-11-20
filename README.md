@@ -2727,6 +2727,7 @@ ChatMemory 是为模型每轮选择和组织会话消息的组件，不等于长
 ## 二十一、延伸阅读
 
 以下链接用于继续查阅 Agent 工程、评测、安全和系统设计资料。
+- [从 Agent Demo 到 Agent Platform：真正的挑战是工程化](agent-demo-to-agent-platform.md) — Agent Runtime、权限、任务恢复、可观测性与评测的工程实践。
 
 - [代码随想录：2026 年 Agent 大厂面试题汇总](https://zhuanlan.zhihu.com/p/2028511483969937686)
 - [李博杰：《AI Agent 入门》](https://github.com/bojieli/ai-agent-book/blob/main/book/chapter1.md)
